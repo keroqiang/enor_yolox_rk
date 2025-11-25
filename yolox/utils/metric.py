@@ -5,6 +5,7 @@ import functools
 import os
 import time
 from collections import defaultdict, deque
+import psutil
 
 import numpy as np
 
@@ -16,31 +17,63 @@ __all__ = [
     "get_total_and_free_memory_in_Mb",
     "occupy_mem",
     "gpu_mem_usage",
+    "mem_usage"
 ]
 
 
 def get_total_and_free_memory_in_Mb(cuda_device):
-    devices_info_str = os.popen(
-        "nvidia-smi --query-gpu=memory.total,memory.used --format=csv,nounits,noheader"
-    )
-    devices_info = devices_info_str.read().strip().split("\n")
-    if "CUDA_VISIBLE_DEVICES" in os.environ:
-        visible_devices = os.environ["CUDA_VISIBLE_DEVICES"].split(',')
-        cuda_device = int(visible_devices[cuda_device])
-    total, used = devices_info[int(cuda_device)].split(",")
-    return int(total), int(used)
+    # 检查是否有可用的GPU
+    if not torch.cuda.is_available():
+        # 无GPU环境下返回默认值
+        return 0, 0
+    
+    try:
+        devices_info_str = os.popen(
+            "nvidia-smi --query-gpu=memory.total,memory.used --format=csv,nounits,noheader"
+        )
+        devices_info = devices_info_str.read().strip().split("\n")
+        
+        # 检查获取的设备信息是否有效
+        if not devices_info or devices_info == [''] or len(devices_info) <= int(cuda_device):
+            return 0, 0
+            
+        if "CUDA_VISIBLE_DEVICES" in os.environ:
+            visible_devices = os.environ["CUDA_VISIBLE_DEVICES"].split(',')
+            if len(visible_devices) > int(cuda_device):
+                cuda_device = int(visible_devices[cuda_device])
+        
+        # 安全地分割和解析内存信息
+        mem_info = devices_info[int(cuda_device)].split(",")
+        if len(mem_info) >= 2:
+            return int(mem_info[0]), int(mem_info[1])
+        return 0, 0
+    except Exception:
+        # 任何异常情况下都返回默认值
+        return 0, 0
 
 
 def occupy_mem(cuda_device, mem_ratio=0.9):
     """
     pre-allocate gpu memory for training to avoid memory Fragmentation.
     """
+    # 检查是否有可用的GPU
+    if not torch.cuda.is_available():
+        return
+        
     total, used = get_total_and_free_memory_in_Mb(cuda_device)
-    max_mem = int(total * mem_ratio)
-    block_mem = max_mem - used
-    x = torch.cuda.FloatTensor(256, 1024, block_mem)
-    del x
-    time.sleep(5)
+    # 只有当total大于0时才进行内存预分配
+    if total > 0:
+        try:
+            max_mem = int(total * mem_ratio)
+            block_mem = max_mem - used
+            # 确保block_mem为正数且合理
+            if block_mem > 0 and block_mem < total:
+                x = torch.cuda.FloatTensor(256, 1024, min(block_mem, 1024))  # 限制最大分配量
+                del x
+                time.sleep(5)
+        except Exception:
+            # 内存分配失败时静默处理
+            pass
 
 
 def gpu_mem_usage():
@@ -49,6 +82,15 @@ def gpu_mem_usage():
     """
     mem_usage_bytes = torch.cuda.max_memory_allocated()
     return mem_usage_bytes / (1024 * 1024)
+
+
+def mem_usage():
+    """
+    Compute the memory usage for the current machine (GB).
+    """
+    gb = 1 << 30
+    mem = psutil.virtual_memory()
+    return mem.used / gb
 
 
 class AverageMeter:
