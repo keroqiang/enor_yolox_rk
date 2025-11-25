@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding:utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
 
 import os
@@ -10,6 +9,8 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from .base_exp import BaseExp
+
+__all__ = ["Exp", "check_exp_value"]
 
 
 class Exp(BaseExp):
@@ -44,6 +45,9 @@ class Exp(BaseExp):
         self.val_ann = "instances_val2017.json"
         # name of annotation file for testing
         self.test_ann = "instances_test2017.json"
+        # selected categories for training, set to None to train all categories
+        # 例如: self.selected_cat_names = ['person', 'car', 'bicycle']
+        self.selected_cat_names = None
 
         # --------------- transform config ----------------- #
         # prob of applying mosaic aug
@@ -127,9 +131,49 @@ class Exp(BaseExp):
         self.model.train()
         return self.model
 
-    def get_data_loader(self, batch_size, is_distributed, no_aug=False, cache_img=False):
+    def get_dataset(self, cache: bool = False, cache_type: str = "ram", selected_cat_names=None):
+        """
+        Get dataset according to cache and cache_type parameters.
+        Args:
+            cache (bool): Whether to cache imgs to ram or disk.
+            cache_type (str, optional): Defaults to "ram".
+                "ram" : Caching imgs to ram for fast training.
+                "disk": Caching imgs to disk for fast training.
+            selected_cat_names (list, optional): List of category names to train on. 
+                If None, train on all categories.
+        """
+        from yolox.data import COCODataset, TrainTransform
+
+        # Use instance's selected_cat_names if not provided
+        selected_cats = selected_cat_names if selected_cat_names is not None else self.selected_cat_names
+        
+        return COCODataset(
+            data_dir=self.data_dir,
+            json_file=self.train_ann,
+            img_size=self.input_size,
+            preproc=TrainTransform(
+                max_labels=50,
+                flip_prob=self.flip_prob,
+                hsv_prob=self.hsv_prob
+            ),
+            cache=cache,
+            cache_type=cache_type,
+            selected_cat_names=selected_cats,
+        )
+
+    def get_data_loader(self, batch_size, is_distributed, no_aug=False, cache_img: str = None, selected_cat_names=None):
+        """
+        Get dataloader according to cache_img parameter.
+        Args:
+            no_aug (bool, optional): Whether to turn off mosaic data enhancement. Defaults to False.
+            cache_img (str, optional): cache_img is equivalent to cache_type.
+                "ram" : Caching imgs to ram for fast training.
+                "disk": Caching imgs to disk for fast training.
+                None: Do not use cache, in this case cache_data is also None.
+            selected_cat_names (list, optional): List of category names to train on. 
+                If None, train on all categories.
+        """
         from yolox.data import (
-            COCODataset,
             TrainTransform,
             YoloBatchSampler,
             DataLoader,
@@ -139,20 +183,16 @@ class Exp(BaseExp):
         )
         from yolox.utils import wait_for_the_master
 
-        with wait_for_the_master():
-            dataset = COCODataset(
-                data_dir=self.data_dir,
-                json_file=self.train_ann,
-                img_size=self.input_size,
-                preproc=TrainTransform(
-                    max_labels=50,
-                    flip_prob=self.flip_prob,
-                    hsv_prob=self.hsv_prob),
-                cache=cache_img,
-            )
+        # if cache is True, we will create self.dataset before launch
+        # else we will create self.dataset after launch
+        if self.dataset is None:
+            with wait_for_the_master():
+                assert cache_img is None, \
+                    "cache_img must be None if you didn't create self.dataset before launch"
+                self.dataset = self.get_dataset(cache=False, cache_type=cache_img, selected_cat_names=selected_cat_names)
 
-        dataset = MosaicDetection(
-            dataset,
+        self.dataset = MosaicDetection(
+            dataset=self.dataset,
             mosaic=not no_aug,
             img_size=self.input_size,
             preproc=TrainTransform(
@@ -168,8 +208,6 @@ class Exp(BaseExp):
             mosaic_prob=self.mosaic_prob,
             mixup_prob=self.mixup_prob,
         )
-
-        self.dataset = dataset
 
         if is_distributed:
             batch_size = batch_size // dist.get_world_size()
@@ -269,16 +307,26 @@ class Exp(BaseExp):
         )
         return scheduler
 
-    def get_eval_loader(self, batch_size, is_distributed, testdev=False, legacy=False):
+    def get_eval_dataset(self, **kwargs):
         from yolox.data import COCODataset, ValTransform
+        testdev = kwargs.get("testdev", False)
+        legacy = kwargs.get("legacy", False)
+        selected_cat_names = kwargs.get("selected_cat_names", None)
+        # Use instance's selected_cat_names if not provided
+        selected_cats = selected_cat_names if selected_cat_names is not None else self.selected_cat_names
 
-        valdataset = COCODataset(
+        return COCODataset(
             data_dir=self.data_dir,
             json_file=self.val_ann if not testdev else self.test_ann,
             name="val2017" if not testdev else "test2017",
             img_size=self.test_size,
             preproc=ValTransform(legacy=legacy),
+            selected_cat_names=selected_cats,
         )
+
+    def get_eval_loader(self, batch_size, is_distributed, **kwargs):
+        # Pass through selected_cat_names to get_eval_dataset
+        valdataset = self.get_eval_dataset(**kwargs)
 
         if is_distributed:
             batch_size = batch_size // dist.get_world_size()
@@ -298,19 +346,21 @@ class Exp(BaseExp):
 
         return val_loader
 
-    def get_evaluator(self, batch_size, is_distributed, testdev=False, legacy=False):
+    def get_evaluator(self, batch_size, is_distributed, testdev=False, legacy=False, selected_cat_names=None):
         from yolox.evaluators import COCOEvaluator
 
-        val_loader = self.get_eval_loader(batch_size, is_distributed, testdev, legacy)
-        evaluator = COCOEvaluator(
-            dataloader=val_loader,
+        # 如果指定了类别过滤，需要相应调整类别数量
+        num_classes = len(selected_cat_names) if selected_cat_names is not None else self.num_classes
+
+        return COCOEvaluator(
+            dataloader=self.get_eval_loader(batch_size, is_distributed,
+                                            testdev=testdev, legacy=legacy, selected_cat_names=selected_cat_names),
             img_size=self.test_size,
             confthre=self.test_conf,
             nmsthre=self.nmsthre,
-            num_classes=self.num_classes,
+            num_classes=num_classes,
             testdev=testdev,
         )
-        return evaluator
 
     def get_trainer(self, args):
         from yolox.core import Trainer
@@ -318,5 +368,10 @@ class Exp(BaseExp):
         # NOTE: trainer shouldn't be an attribute of exp object
         return trainer
 
-    def eval(self, model, evaluator, is_distributed, half=False):
-        return evaluator.evaluate(model, is_distributed, half)
+    def eval(self, model, evaluator, is_distributed, half=False, return_outputs=False):
+        return evaluator.evaluate(model, is_distributed, half, return_outputs=return_outputs)
+
+
+def check_exp_value(exp: Exp):
+    h, w = exp.input_size
+    assert h % 32 == 0 and w % 32 == 0, "input size must be multiples of 32"

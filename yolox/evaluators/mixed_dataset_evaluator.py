@@ -16,6 +16,7 @@ from tqdm import tqdm
 import numpy as np
 
 import torch
+from pycocotools.coco import COCO
 
 from yolox.data.datasets import COCO_CLASSES
 from yolox.utils import (
@@ -28,6 +29,7 @@ from yolox.utils import (
 )
 
 
+# 直接从coco_evaluator.py复制的工具函数
 def per_class_AR_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "AR"], colums=6):
     per_class_AR = {}
     recalls = coco_eval.eval["recall"]
@@ -76,10 +78,10 @@ def per_class_AP_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "A
     return table
 
 
-class COCOEvaluator:
+class MixedDatasetEvaluator:
     """
-    COCO AP Evaluation class.  All the data in the val2017 dataset are processed
-    and evaluated by COCO API.
+    混合数据集COCO AP评估类。专为处理多个数据集合并后的评估场景设计，
+    支持处理ConcatDataset对象，确保正确评估混合数据集上的模型性能。
     """
 
     def __init__(
@@ -207,6 +209,20 @@ class COCOEvaluator:
     def convert_to_coco_format(self, outputs, info_imgs, ids, return_outputs=False):
         data_list = []
         image_wise_data = defaultdict(dict)
+        
+        # 获取类别信息
+        class_ids = self.dataloader.dataset.class_ids
+        class_names = self.dataloader.dataset.class_names
+        
+        # 获取类别映射信息，如果有的话
+        class_mapping = None
+        if hasattr(self.dataloader.dataset, 'datasets'):
+            # 从第一个子数据集获取类别映射
+            for sub_dataset in self.dataloader.dataset.datasets:
+                if hasattr(sub_dataset, 'class_mapping'):
+                    class_mapping = sub_dataset.class_mapping
+                    break
+        
         for (output, img_h, img_w, img_id) in zip(
             outputs, info_imgs[0], info_imgs[1], ids
         ):
@@ -224,24 +240,30 @@ class COCOEvaluator:
             cls = output[:, 6]
             scores = output[:, 4] * output[:, 5]
 
+            # 模型输出的类别索引已经是统一的类别ID（0, 1, 2）
+            categories = []
+            for ind in range(bboxes.shape[0]):
+                # 直接使用模型输出的类别索引作为category_id
+                category_id = int(cls[ind])
+                categories.append(category_id)
+
             image_wise_data.update({
                 int(img_id): {
                     "bboxes": [box.numpy().tolist() for box in bboxes],
                     "scores": [score.numpy().item() for score in scores],
-                    "categories": [
-                        self.dataloader.dataset.class_ids[int(cls[ind])]
-                        for ind in range(bboxes.shape[0])
-                    ],
+                    "categories": categories,
                 }
             })
 
             bboxes = xyxy2xywh(bboxes)
 
             for ind in range(bboxes.shape[0]):
-                label = self.dataloader.dataset.class_ids[int(cls[ind])]
+                # 直接使用模型输出的类别索引作为category_id
+                # 这个ID已经是通过class_mapping映射后的统一ID
+                category_id = int(cls[ind])
                 pred_data = {
                     "image_id": int(img_id),
-                    "category_id": label,
+                    "category_id": category_id,
                     "bbox": bboxes[ind].numpy().tolist(),
                     "score": scores[ind].numpy().item(),
                     "segmentation": [],
@@ -251,6 +273,23 @@ class COCOEvaluator:
         if return_outputs:
             return data_list, image_wise_data
         return data_list
+
+    def convert_numpy_types(self, obj):
+        """
+        将NumPy数据类型转换为Python原生类型，以便JSON序列化
+        """
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {key: self.convert_numpy_types(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [self.convert_numpy_types(item) for item in obj]
+        else:
+            return obj
 
     def evaluate_prediction(self, data_dict, statistics):
         if not is_main_process():
@@ -281,41 +320,115 @@ class COCOEvaluator:
 
         # Evaluate the Dt (detection) json comparing with the ground truth
         if len(data_dict) > 0:
-            cocoGt = self.dataloader.dataset.coco
-            # TODO: since pycocotools can't process dict in py36, write data to json file.
+            # 对于混合数据集，我们需要收集所有子数据集的真实标注数据
+            # 创建一个完整的COCO格式ground truth对象
+            merged_gt = {
+                "images": [],
+                "annotations": [],
+                "categories": [],
+                "info": {"description": "Merged COCO Ground Truth for Mixed Datasets"},
+                "licenses": []
+            }
+            
+            # 添加类别信息（使用统一的类别索引）
+            for i, class_name in enumerate(self.dataloader.dataset.class_names):
+                merged_gt["categories"].append({
+                    "id": i,  # 直接使用0, 1, 2作为类别ID
+                    "name": class_name,
+                    "supercategory": "object"
+                })
+            
+            # 收集所有子数据集的图像和标注信息
+            dataset = self.dataloader.dataset
+            if hasattr(dataset, 'datasets'):  # 如果是ConcatDataset
+                # 遍历所有子数据集
+                for sub_dataset in dataset.datasets:
+                    if hasattr(sub_dataset, 'coco') and sub_dataset.coco is not None:
+                        # 收集图像信息
+                        for img_info in sub_dataset.coco.dataset['images']:
+                            # 确保图像ID唯一
+                            img_id = img_info['id']
+                            # 转换NumPy类型
+                            converted_img_info = self.convert_numpy_types(img_info)
+                            if not any(existing_img['id'] == img_id for existing_img in merged_gt['images']):
+                                merged_gt['images'].append(converted_img_info)
+                        
+                        # 收集标注信息并进行类别映射
+                        # 使用子数据集的cat_id_to_custom_id映射表（这是MappedCOCODataset中构建的）
+                        if hasattr(sub_dataset, 'cat_id_to_custom_id'):
+                            for ann in sub_dataset.coco.dataset['annotations']:
+                                # 复制标注信息
+                                new_ann = self.convert_numpy_types(ann.copy())
+                                
+                                # 获取原始类别ID
+                                orig_cat_id = ann['category_id']
+                                
+                                # 使用子数据集的cat_id_to_custom_id映射表进行映射
+                                if orig_cat_id in sub_dataset.cat_id_to_custom_id:
+                                    new_ann['category_id'] = sub_dataset.cat_id_to_custom_id[orig_cat_id]
+                                    # 只添加有效的标注（确保类别ID在0到类别总数-1之间）
+                                    if 0 <= new_ann['category_id'] < len(self.dataloader.dataset.class_names):
+                                        merged_gt['annotations'].append(new_ann)
+                        else:
+                            # 如果没有直接的ID映射表，尝试通过类别名称映射
+                            for ann in sub_dataset.coco.dataset['annotations']:
+                                # 复制标注信息
+                                new_ann = self.convert_numpy_types(ann.copy())
+                                
+                                # 获取原始类别ID
+                                orig_cat_id = ann['category_id']
+                                
+                                # 查找该类别ID对应的名称
+                                orig_cat_name = None
+                                for cat in sub_dataset.coco.dataset['categories']:
+                                    if cat['id'] == orig_cat_id:
+                                        orig_cat_name = cat['name']
+                                        break
+                                
+                                # 如果找到类别名称，尝试在统一类别中找到对应的索引
+                                if orig_cat_name is not None:
+                                    # 在统一的类别名称列表中查找索引
+                                    if orig_cat_name in self.dataloader.dataset.class_names:
+                                        new_ann['category_id'] = self.dataloader.dataset.class_names.index(orig_cat_name)
+                                        merged_gt['annotations'].append(new_ann)
+            
+            # 转换预测结果中的NumPy类型
+            converted_data_dict = self.convert_numpy_types(data_dict)
+            
+            # 创建临时文件来保存合并后的ground truth
+            _, tmp_gt = tempfile.mkstemp()
+            json.dump(merged_gt, open(tmp_gt, "w"))
+            
+            # 加载合并后的ground truth
+            cocoGt = COCO(tmp_gt)
+            
+            # 保存检测结果
             if self.testdev:
-                json.dump(data_dict, open("./yolox_testdev_2017.json", "w"))
+                json.dump(converted_data_dict, open("./yolox_testdev_2017.json", "w"))
                 cocoDt = cocoGt.loadRes("./yolox_testdev_2017.json")
             else:
-                _, tmp = tempfile.mkstemp()
-                json.dump(data_dict, open(tmp, "w"))
-                # 确保cocoGt.dataset中存在'info'字段，否则loadRes会失败
-                if 'info' not in cocoGt.dataset:
-                    cocoGt.dataset['info'] = {}
-                cocoDt = cocoGt.loadRes(tmp)
+                _, tmp_dt = tempfile.mkstemp()
+                json.dump(converted_data_dict, open(tmp_dt, "w"))
+                cocoDt = cocoGt.loadRes(tmp_dt)
+            
             try:
                 from yolox.layers import COCOeval_opt as COCOeval
             except ImportError:
                 from pycocotools.cocoeval import COCOeval
-
                 logger.warning("Use standard COCOeval.")
 
             # 创建COCOeval实例
             cocoEval = COCOeval(cocoGt, cocoDt, annType[1])
             
-            # 检查数据集是否有selected_cat_names属性
-            if hasattr(self.dataloader.dataset, 'selected_cat_names') and self.dataloader.dataset.selected_cat_names is not None:
-                # 获取选定类别的ID列表
-                selected_cat_ids = self.dataloader.dataset.class_ids
-                # 只评估选定的类别
-                cocoEval.params.catIds = selected_cat_ids
-                cat_ids = selected_cat_ids
-                cat_names = self.dataloader.dataset._classes
-            else:
-                # 使用所有类别
-                cat_ids = list(cocoGt.cats.keys())
-                cat_names = [cocoGt.cats[catId]['name'] for catId in sorted(cat_ids)]
+            # 使用混合数据集的类别ID和类别名称
+            cat_ids = self.dataloader.dataset.class_ids
+            cat_names = self.dataloader.dataset.class_names
             
+            # 设置评估参数
+            cocoEval.params.catIds = cat_ids
+            cocoEval.params.imgIds = cocoGt.getImgIds()  # 使用所有图像进行评估
+            
+            # 执行评估
             cocoEval.evaluate()
             cocoEval.accumulate()
             redirect_string = io.StringIO()
@@ -323,12 +436,14 @@ class COCOEvaluator:
                 cocoEval.summarize()
             info += redirect_string.getvalue()
             
+            # 添加类别AP和AR表格
             if self.per_class_AP:
                 AP_table = per_class_AP_table(cocoEval, class_names=cat_names)
                 info += "per class AP:\n" + AP_table + "\n"
             if self.per_class_AR:
                 AR_table = per_class_AR_table(cocoEval, class_names=cat_names)
                 info += "per class AR:\n" + AR_table + "\n"
+            
             return cocoEval.stats[0], cocoEval.stats[1], info
         else:
             return 0, 0, info

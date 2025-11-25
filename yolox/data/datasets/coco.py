@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii, Inc. and its affiliates.
-
+import copy
 import os
-from loguru import logger
 
 import cv2
 import numpy as np
 from pycocotools.coco import COCO
 
 from ..dataloading import get_yolox_datadir
-from .datasets_wrapper import Dataset
+from .datasets_wrapper import CacheDataset, cache_read_img
 
 
 def remove_useless_info(coco):
@@ -32,7 +31,7 @@ def remove_useless_info(coco):
                 anno.pop("segmentation", None)
 
 
-class COCODataset(Dataset):
+class COCODataset(CacheDataset):
     """
     COCO dataset class.
     """
@@ -45,6 +44,8 @@ class COCODataset(Dataset):
         img_size=(416, 416),
         preproc=None,
         cache=False,
+        cache_type="ram",
+        selected_cat_names=None,
     ):
         """
         COCO dataset initialization. Annotation data are read into memory by COCO API.
@@ -54,105 +55,123 @@ class COCODataset(Dataset):
             name (str): COCO data name (e.g. 'train2017' or 'val2017')
             img_size (int): target image size after pre-processing
             preproc: data augmentation strategy
+            selected_cat_names (list): list of category names to train on. If None, train on all categories.
         """
-        super().__init__(img_size)
         if data_dir is None:
             data_dir = os.path.join(get_yolox_datadir(), "COCO")
         self.data_dir = data_dir
         self.json_file = json_file
+        self.selected_cat_names = selected_cat_names
 
         self.coco = COCO(os.path.join(self.data_dir, "annotations", self.json_file))
         remove_useless_info(self.coco)
-        self.ids = self.coco.getImgIds()
-        self.class_ids = sorted(self.coco.getCatIds())
-        cats = self.coco.loadCats(self.coco.getCatIds())
-        self._classes = tuple([c["name"] for c in cats])
-        self.imgs = None
+        
+        # 过滤类别
+        if selected_cat_names is not None:
+            # 获取所有类别信息
+            all_cats = self.coco.loadCats(self.coco.getCatIds())
+            # 创建类别名称到id的映射
+            name_to_id = {cat["name"]: cat["id"] for cat in all_cats}
+            # 验证选择的类别是否都存在
+            for cat_name in selected_cat_names:
+                if cat_name not in name_to_id:
+                    raise ValueError(f"Category '{cat_name}' not found in COCO dataset")
+            # 获取选定类别的id
+            self.class_ids = sorted([name_to_id[name] for name in selected_cat_names])
+            self.cats = [cat for cat in all_cats if cat["id"] in self.class_ids]
+            self._classes = tuple(selected_cat_names)
+            # 获取包含选定类别的图像id
+            img_ids_with_selected_cats = []
+            for cat_id in self.class_ids:
+                img_ids_with_selected_cats.extend(self.coco.getImgIds(catIds=[cat_id]))
+            # 去重并排序
+            self.ids = sorted(list(set(img_ids_with_selected_cats)))
+            
+            # 打印统计信息，确认类别过滤是否正常工作
+            print(f"===== COCO Dataset Category Filtering =====")
+            print(f"Selected categories: {selected_cat_names}")
+            print(f"Original total images: {len(self.coco.getImgIds())}")
+            print(f"Filtered images count: {len(self.ids)}")
+            print(f"===== COCO Dataset Category Filtering =====")
+        else:
+            # 使用所有类别
+            self.class_ids = sorted(self.coco.getCatIds())
+            self.cats = self.coco.loadCats(self.coco.getCatIds())
+            self._classes = tuple([c["name"] for c in self.cats])
+            self.ids = self.coco.getImgIds()
+        
+        self.num_imgs = len(self.ids)
         self.name = name
         self.img_size = img_size
         self.preproc = preproc
         self.annotations = self._load_coco_annotations()
-        if cache:
-            self._cache_images()
+
+        path_filename = [os.path.join(name, anno[3]) for anno in self.annotations]
+        super().__init__(
+            input_dimension=img_size,
+            num_imgs=self.num_imgs,
+            data_dir=data_dir,
+            cache_dir_name=f"cache_{name}",
+            path_filename=path_filename,
+            cache=cache,
+            cache_type=cache_type,
+        )
 
     def __len__(self):
-        return len(self.ids)
-
-    def __del__(self):
-        del self.imgs
+        return self.num_imgs
 
     def _load_coco_annotations(self):
-        return [self.load_anno_from_ids(_ids) for _ids in self.ids]
-
-    def _cache_images(self):
-        logger.warning(
-            "\n********************************************************************************\n"
-            "You are using cached images in RAM to accelerate training.\n"
-            "This requires large system RAM.\n"
-            "Make sure you have 200G+ RAM and 136G available disk space for training COCO.\n"
-            "********************************************************************************\n"
-        )
-        max_h = self.img_size[0]
-        max_w = self.img_size[1]
-        cache_file = os.path.join(self.data_dir, f"img_resized_cache_{self.name}.array")
-        if not os.path.exists(cache_file):
-            logger.info(
-                "Caching images for the first time. This might take about 20 minutes for COCO"
-            )
-            self.imgs = np.memmap(
-                cache_file,
-                shape=(len(self.ids), max_h, max_w, 3),
-                dtype=np.uint8,
-                mode="w+",
-            )
-            from tqdm import tqdm
-            from multiprocessing.pool import ThreadPool
-
-            NUM_THREADs = min(8, os.cpu_count())
-            loaded_images = ThreadPool(NUM_THREADs).imap(
-                lambda x: self.load_resized_img(x),
-                range(len(self.annotations)),
-            )
-            pbar = tqdm(enumerate(loaded_images), total=len(self.annotations))
-            for k, out in pbar:
-                self.imgs[k][: out.shape[0], : out.shape[1], :] = out.copy()
-            self.imgs.flush()
-            pbar.close()
-        else:
-            logger.warning(
-                "You are using cached imgs! Make sure your dataset is not changed!!\n"
-                "Everytime the self.input_size is changed in your exp file, you need to delete\n"
-                "the cached data and re-generate them.\n"
-            )
-
-        logger.info("Loading cached imgs...")
-        self.imgs = np.memmap(
-            cache_file,
-            shape=(len(self.ids), max_h, max_w, 3),
-            dtype=np.uint8,
-            mode="r+",
-        )
+        annotations = [self.load_anno_from_ids(_ids) for _ids in self.ids]
+        
+        # 计算标注数量统计
+        total_objects = 0
+        class_counts = {i: 0 for i in range(len(self._classes))}
+        for anno in annotations:
+            # anno[0] 是标注数据 (num_objs, 5)
+            objects = anno[0]
+            total_objects += len(objects)
+            for obj in objects:
+                class_idx = int(obj[4])
+                if class_idx in class_counts:
+                    class_counts[class_idx] += 1
+        
+        # 打印标注统计信息
+        print(f"===== Annotations Statistics =====")
+        print(f"Total objects annotated: {total_objects}")
+        print(f"Objects per class:")
+        for i, class_name in enumerate(self._classes):
+            print(f"  - {class_name}: {class_counts.get(i, 0)}")
+        print(f"===== Annotations Statistics =====")
+        
+        return annotations
 
     def load_anno_from_ids(self, id_):
         im_ann = self.coco.loadImgs(id_)[0]
         width = im_ann["width"]
         height = im_ann["height"]
-        anno_ids = self.coco.getAnnIds(imgIds=[int(id_)], iscrowd=False)
+        
+        # 如果指定了类别过滤，只获取选定类别的标注
+        if self.selected_cat_names is not None:
+            anno_ids = self.coco.getAnnIds(imgIds=[int(id_)], catIds=self.class_ids, iscrowd=False)
+        else:
+            anno_ids = self.coco.getAnnIds(imgIds=[int(id_)], iscrowd=False)
+            
         annotations = self.coco.loadAnns(anno_ids)
         objs = []
         for obj in annotations:
-            x1 = np.max((0, obj["bbox"][0]))
-            y1 = np.max((0, obj["bbox"][1]))
-            x2 = np.min((width, x1 + np.max((0, obj["bbox"][2]))))
-            y2 = np.min((height, y1 + np.max((0, obj["bbox"][3]))))
-            if obj["area"] > 0 and x2 >= x1 and y2 >= y1:
-                obj["clean_bbox"] = [x1, y1, x2, y2]
-                objs.append(obj)
+            # 确保只处理选定类别的对象（额外检查以防万一）
+            if self.selected_cat_names is None or obj["category_id"] in self.class_ids:
+                x1 = np.max((0, obj["bbox"][0]))
+                y1 = np.max((0, obj["bbox"][1]))
+                x2 = np.min((width, x1 + np.max((0, obj["bbox"][2]))))
+                y2 = np.min((height, y1 + np.max((0, obj["bbox"][3]))))
+                if obj["area"] > 0 and x2 >= x1 and y2 >= y1:
+                    obj["clean_bbox"] = [x1, y1, x2, y2]
+                    objs.append(obj)
 
         num_objs = len(objs)
 
         res = np.zeros((num_objs, 5))
-
         for ix, obj in enumerate(objs):
             cls = self.class_ids.index(obj["category_id"])
             res[ix, 0:4] = obj["clean_bbox"]
@@ -195,19 +214,18 @@ class COCODataset(Dataset):
 
         return img
 
+    @cache_read_img(use_cache=True)
+    def read_img(self, index):
+        return self.load_resized_img(index)
+
     def pull_item(self, index):
         id_ = self.ids[index]
+        label, origin_image_size, _, _ = self.annotations[index]
+        img = self.read_img(index)
 
-        res, img_info, resized_info, _ = self.annotations[index]
-        if self.imgs is not None:
-            pad_img = self.imgs[index]
-            img = pad_img[: resized_info[0], : resized_info[1], :].copy()
-        else:
-            img = self.load_resized_img(index)
+        return img, copy.deepcopy(label), origin_image_size, np.array([id_])
 
-        return img, res.copy(), img_info, np.array([id_])
-
-    @Dataset.mosaic_getitem
+    @CacheDataset.mosaic_getitem
     def __getitem__(self, index):
         """
         One image / label pair for the given index is picked up and pre-processed.
