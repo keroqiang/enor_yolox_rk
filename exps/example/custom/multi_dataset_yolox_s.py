@@ -17,8 +17,6 @@ class Exp(MyExp):
         self.width = 0.50
         self.exp_name = os.path.split(os.path.realpath(__file__))[1].split(".")[0]
         
-        self.num_classes = 3
-        
         # COCO数据集配置
         self.coco_data_dir = None  # 使用默认的datasets目录
         self.coco_train_ann = "instances_train2017.json"
@@ -46,6 +44,7 @@ class Exp(MyExp):
         self.max_epoch = 200
         self.data_num_workers = 8
         self.eval_interval = 1
+        self.num_classes = len(self.class_names)
 
     def get_dataset(self, cache: bool = False, cache_type: str = "ram", selected_cat_names=None):
         """
