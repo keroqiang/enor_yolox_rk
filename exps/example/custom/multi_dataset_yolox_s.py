@@ -21,7 +21,7 @@ class Exp(MyExp):
         self.coco_data_dir = None  # 使用默认的datasets目录
         self.coco_train_ann = "instances_train2017.json"
         self.coco_val_ann = "instances_val2017.json"
-        self.coco_selected_cats = ['cat', 'dog']
+        self.coco_selected_cats = ['person', 'cat', 'dog', 'chair', 'couch']
         
         # Charger数据集配置
         self.charger_data_dir = "datasets/charger"
@@ -32,14 +32,17 @@ class Exp(MyExp):
         # 类别映射：将不同数据集的类别ID映射到统一的ID
         self.class_mapping = {
             # COCO数据集类别映射
-            'cat': 0,
-            'dog': 1,
+            'person': 0,
+            'cat': 1,
+            'dog': 2,
+            'chair': 3,
+            'couch': 4,
             # Charger数据集类别映射
-            'charger': 2
+            'charger': 5
         }
         
         # 类别名称顺序，与class_mapping中的ID对应
-        self.class_names = ['cat', 'dog', 'charger']
+        self.class_names = ['person', 'cat', 'dog', 'chair', 'couch', 'charger']
         
         self.max_epoch = 200
         self.data_num_workers = 8
