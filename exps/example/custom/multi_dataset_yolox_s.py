@@ -49,6 +49,7 @@ class Exp(MyExp):
         self.eval_interval = 1
         self.save_history_ckpt = False
         self.num_classes = len(self.class_names)
+        # self.num_classes = 3
 
     def get_dataset(self, cache: bool = False, cache_type: str = "ram", selected_cat_names=None):
         """

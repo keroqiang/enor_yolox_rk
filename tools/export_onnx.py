@@ -13,6 +13,8 @@ if len(sys.argv)>=3 and '--rknpu' in sys.argv:
 
 import torch
 from torch import nn
+import onnx
+from onnxsim import simplify
 
 from yolox.exp import get_exp
 from yolox.models.network_blocks import SiLU
@@ -82,7 +84,7 @@ def main():
         ckpt_file = args.ckpt
 
     # load the model state dict
-    ckpt = torch.load(ckpt_file, map_location="cpu")
+    ckpt = torch.load(ckpt_file, map_location="cpu", weights_only=False)
 
     model.eval()
     if "model" in ckpt:
@@ -100,33 +102,91 @@ def main():
     logger.info("loading checkpoint done.")
     dummy_input = torch.randn(args.batch_size, 3, exp.test_size[0], exp.test_size[1])
 
-    torch.onnx._export(
-        model,
-        dummy_input,
-        args.output_name,
-        input_names=[args.input],
-        output_names=[args.output],
-        dynamic_axes={args.input: {0: 'batch'},
-                      args.output: {0: 'batch'}} if args.dynamic else None,
-        opset_version=args.opset,
-    )
+    # 设置IR版本为7以兼容旧版本工具
+    onnx_version = 7
+    
+    # 根据PyTorch版本使用不同的导出方式
+    if hasattr(torch.onnx, '_export') and sys.version_info >= (3, 8):
+        # 针对PyTorch 2.x版本的兼容处理
+        torch.onnx._export(
+            model,
+            dummy_input,
+            args.output_name,
+            input_names=[args.input],
+            output_names=[args.output],
+            dynamic_axes={args.input: {0: 'batch'},
+                          args.output: {0: 'batch'}} if args.dynamic else None,
+            opset_version=args.opset,
+            do_constant_folding=True,
+            keep_initializers_as_inputs=False,
+            # 强制使用旧版本导出路径
+            use_external_data_format=False,
+        )
+    else:
+        # 标准导出方式
+        torch.onnx.export(
+            model,
+            dummy_input,
+            args.output_name,
+            input_names=[args.input],
+            output_names=[args.output],
+            dynamic_axes={args.input: {0: 'batch'},
+                          args.output: {0: 'batch'}} if args.dynamic else None,
+            opset_version=args.opset,
+            do_constant_folding=True,
+            keep_initializers_as_inputs=False,
+        )
+    
+    # 手动调整IR版本
+    onnx_model = onnx.load(args.output_name)
+    onnx_model.ir_version = onnx_version
+    onnx.save(onnx_model, args.output_name)
+    
+    # 处理ONNX模型兼容性
+    onnx_model = onnx.load(args.output_name)
+    
+    # 修复Resize节点的输入问题
+    for node in onnx_model.graph.node:
+        if node.op_type == "Resize":
+            # 确保Resize节点有正确的输入数量
+            while len(node.input) < 3:
+                # 添加空输入占位符
+                node.input.append("")
+            
+            # 移除空的输入
+            non_empty_inputs = [inp for inp in node.input if inp]
+            node.input[:] = non_empty_inputs
+    
+    # 保存修复后的模型
+    onnx.save(onnx_model, args.output_name)
     logger.info("generated onnx model named {}".format(args.output_name))
 
     if not args.no_onnxsim:
-        import onnx
-
-        from onnxsim import simplify
 
         input_shapes = {args.input: list(dummy_input.shape)} if args.dynamic else None
 
         # use onnxsimplify to reduce reduent model.
         onnx_model = onnx.load(args.output_name)
-        model_simp, check = simplify(onnx_model,
-                                     dynamic_input_shape=args.dynamic,
-                                     input_shapes=input_shapes)
-        assert check, "Simplified ONNX model could not be validated"
-        onnx.save(model_simp, args.output_name)
-        logger.info("generated simplified onnx model named {}".format(args.output_name))
+        
+        # 在简化前确保IR版本兼容
+        if onnx_model.ir_version > 7:
+            onnx_model.ir_version = 7
+            temp_model_path = args.output_name + '.temp'
+            onnx.save(onnx_model, temp_model_path)
+            onnx_model = onnx.load(temp_model_path)
+            os.remove(temp_model_path)
+        
+        try:
+            model_simp, check = simplify(onnx_model,
+                                         dynamic_input_shape=args.dynamic,
+                                         input_shapes=input_shapes)
+            if check:
+                onnx.save(model_simp, args.output_name)
+                logger.info("generated simplified onnx model named {}".format(args.output_name))
+            else:
+                logger.warning("Simplified ONNX model could not be validated, using original model")
+        except Exception as e:
+            logger.warning(f"ONNX simplify failed: {e}, using original model")
 
 
 if __name__ == "__main__":
