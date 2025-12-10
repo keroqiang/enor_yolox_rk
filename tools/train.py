@@ -14,6 +14,7 @@ from yolox.core import launch
 from yolox.exp import Exp, check_exp_value, get_exp
 from yolox.utils import configure_module, configure_nccl, configure_omp, get_num_devices
 
+torch.cuda.set_per_process_memory_fraction(0.95)
 
 def make_parser():
     parser = argparse.ArgumentParser("YOLOX train parser")

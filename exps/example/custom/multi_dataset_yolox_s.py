@@ -47,6 +47,7 @@ class Exp(MyExp):
         self.max_epoch = 200
         self.data_num_workers = 8
         self.eval_interval = 1
+        self.save_history_ckpt = False
         self.num_classes = len(self.class_names)
 
     def get_dataset(self, cache: bool = False, cache_type: str = "ram", selected_cat_names=None):
