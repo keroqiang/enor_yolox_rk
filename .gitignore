@@ -1,6 +1,13 @@
 ### Linux ###
 *~
 
+# bmad
+_bmad/
+_bmad-output/
+
+# claude
+.claude/
+
 # user experiments directory
 YOLOX_outputs/
 datasets/
