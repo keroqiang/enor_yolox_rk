@@ -16,14 +16,15 @@ class Exp(MyExp):
         self.depth = 0.33
         self.width = 0.50
         self.exp_name = os.path.split(os.path.realpath(__file__))[1].split(".")[0]
+
+        # 将训练时评估的conf设成0.5看下
+        self.test_conf = 0.5
         
         # COCO数据集配置
-        self.coco_data_dir = None  # 使用默认的datasets目录
-        # self.coco_train_ann = "instances_train2017.json"
-        # self.coco_val_ann = "instances_val2017.json"
-        self.coco_train_ann = "train_person_160k.json"
-        self.coco_val_ann = "val_person_160k.json"
-        self.coco_selected_cats = ['person', 'cat', 'dog', 'chair', 'couch']
+        self.coco_data_dir = None
+        self.coco_train_ann = "coco_train_person48k_cat_dog_chair6k_couch_bird.json"
+        self.coco_val_ann = "instances_val2017_area_greater_100.json"
+        self.coco_selected_cats = ['person', 'cat', 'dog', 'chair', 'couch', 'bird']
         
         # Charger数据集配置
         self.charger_data_dir = "datasets/charger"
@@ -45,12 +46,13 @@ class Exp(MyExp):
             'dog': 2,
             'chair': 3,
             'couch': 4,
+            'bird': 5,
             # Charger数据集类别映射
-            'charger': 5
+            'charger': 6
         }
         
         # 类别名称顺序，与class_mapping中的ID对应
-        self.class_names = ['person', 'cat', 'dog', 'chair', 'couch', 'charger']
+        self.class_names = ['person', 'cat', 'dog', 'chair', 'couch', 'bird', 'charger']
         
         self.max_epoch = 600
         self.data_num_workers = 4

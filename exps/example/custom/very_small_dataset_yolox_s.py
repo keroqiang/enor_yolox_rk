@@ -19,11 +19,9 @@ class Exp(MyExp):
         
         # COCO数据集配置
         self.coco_data_dir = None  # 使用默认的datasets目录
-        # self.coco_train_ann = "instances_train2017.json"
-        # self.coco_val_ann = "instances_val2017.json"
-        self.coco_train_ann = "train_person_160k.json"
-        self.coco_val_ann = "val_person_160k.json"
-        self.coco_selected_cats = ['person', 'cat', 'dog', 'chair', 'couch']
+        self.coco_train_ann = "instances_train2017.json"
+        self.coco_val_ann = "instances_val2017.json"
+        self.coco_selected_cats = ['person', 'cat', 'dog', 'chair', 'couch', 'sheep', 'cow', 'bear', 'giraffe']
         
         # Charger数据集配置
         self.charger_data_dir = "datasets/charger"
@@ -31,11 +29,11 @@ class Exp(MyExp):
         self.charger_val_ann = "val_annotations.coco.json"
         self.charger_selected_cats = ['charger']
 
-        # object365_cat_dog数据集配置
-        self.object365_data_dir = "datasets/object365_cat_dog"
-        self.object365_train_ann = "train_cat_dog.json"
-        self.object365_val_ann = "val_cat_dog.json"
-        self.object365_selected_cats = ['cat', 'dog']
+        # # object365_cat_dog数据集配置
+        # self.object365_data_dir = "datasets/object365_cat_dog"
+        # self.object365_train_ann = "train_cat_dog.json"
+        # self.object365_val_ann = "val_cat_dog.json"
+        # self.object365_selected_cats = ['cat', 'dog']
         
         # 类别映射：将不同数据集的类别ID映射到统一的ID
         self.class_mapping = {
@@ -45,14 +43,19 @@ class Exp(MyExp):
             'dog': 2,
             'chair': 3,
             'couch': 4,
+            'sheep': 5,
+            'cow': 6,
+            'bear': 7,
+            'giraffe': 8,
             # Charger数据集类别映射
-            'charger': 5
+            'charger': 9
         }
         
         # 类别名称顺序，与class_mapping中的ID对应
-        self.class_names = ['person', 'cat', 'dog', 'chair', 'couch', 'charger']
+        # self.class_names = ['person', 'cat', 'dog', 'chair', 'couch', 'sheep', 'cow', 'bear', 'giraffe', 'charger']
+        self.class_names = self.coco_selected_cats + self.charger_selected_cats
         
-        self.max_epoch = 600
+        self.max_epoch = 100
         self.data_num_workers = 4
         self.eval_interval = 1
         self.save_history_ckpt = False
@@ -99,24 +102,24 @@ class Exp(MyExp):
         )
         
         # 创建object365_cat_dog数据集实例，并使用类别映射
-        object365_dataset = MappedCOCODataset(
-            data_dir=self.object365_data_dir,
-            json_file=self.object365_train_ann,
-            name="train",
-            img_size=self.input_size,
-            preproc=TrainTransform(
-                max_labels=50,
-                flip_prob=self.flip_prob,
-                hsv_prob=self.hsv_prob
-            ),
-            cache=cache,
-            cache_type=cache_type,
-            selected_cat_names=self.object365_selected_cats,
-            class_mapping=self.class_mapping
-        )
+        # object365_dataset = MappedCOCODataset(
+        #     data_dir=self.object365_data_dir,
+        #     json_file=self.object365_train_ann,
+        #     name="train",
+        #     img_size=self.input_size,
+        #     preproc=TrainTransform(
+        #         max_labels=50,
+        #         flip_prob=self.flip_prob,
+        #         hsv_prob=self.hsv_prob
+        #     ),
+        #     cache=cache,
+        #     cache_type=cache_type,
+        #     selected_cat_names=self.object365_selected_cats,
+        #     class_mapping=self.class_mapping
+        # )
         
-        # 使用ConcatDataset合并三个数据集
-        concat_dataset = ConcatDataset([coco_dataset, charger_dataset, object365_dataset])
+        # 使用ConcatDataset合并两个数据集
+        concat_dataset = ConcatDataset([coco_dataset, charger_dataset])
         
         # 确保合并后的数据集知道类别名称
         concat_dataset.class_names = self.class_names
@@ -154,19 +157,19 @@ class Exp(MyExp):
             class_mapping=self.class_mapping
         )
         
-        # 创建评估用的object365_cat_dog数据集，并使用类别映射
-        object365_val_dataset = MappedCOCODataset(
-            data_dir=self.object365_data_dir,
-            json_file=self.object365_val_ann,
-            name="val",
-            img_size=self.test_size,
-            preproc=ValTransform(legacy=legacy),
-            selected_cat_names=self.object365_selected_cats,
-            class_mapping=self.class_mapping
-        )
+        # # 创建评估用的object365_cat_dog数据集，并使用类别映射
+        # object365_val_dataset = MappedCOCODataset(
+        #     data_dir=self.object365_data_dir,
+        #     json_file=self.object365_val_ann,
+        #     name="val",
+        #     img_size=self.test_size,
+        #     preproc=ValTransform(legacy=legacy),
+        #     selected_cat_names=self.object365_selected_cats,
+        #     class_mapping=self.class_mapping
+        # )
         
         # 使用ConcatDataset合并评估数据集
-        concat_val_dataset = ConcatDataset([coco_val_dataset, charger_val_dataset, object365_val_dataset])
+        concat_val_dataset = ConcatDataset([coco_val_dataset, charger_val_dataset])
         
         # 确保合并后的评估数据集知道类别名称和类别ID
         concat_val_dataset.class_names = self.class_names
