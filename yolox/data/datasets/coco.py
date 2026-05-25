@@ -68,18 +68,22 @@ class COCODataset(CacheDataset):
         
         # 过滤类别
         if selected_cat_names is not None:
-            # 获取所有类别信息
             all_cats = self.coco.loadCats(self.coco.getCatIds())
-            # 创建类别名称到id的映射
             name_to_id = {cat["name"]: cat["id"] for cat in all_cats}
-            # 验证选择的类别是否都存在
+            name_to_id_lower = {cat["name"].lower(): cat["id"] for cat in all_cats}
+            lower_to_original_name = {cat["name"].lower(): cat["name"] for cat in all_cats}
+            matched_cat_names = []
             for cat_name in selected_cat_names:
-                if cat_name not in name_to_id:
+                if cat_name in name_to_id:
+                    matched_cat_names.append(cat_name)
+                elif cat_name.lower() in name_to_id_lower:
+                    matched_cat_names.append(lower_to_original_name[cat_name.lower()])
+                else:
                     raise ValueError(f"Category '{cat_name}' not found in COCO dataset")
-            # 获取选定类别的id
-            self.class_ids = sorted([name_to_id[name] for name in selected_cat_names])
+            self.class_ids = sorted([name_to_id[name] for name in matched_cat_names])
             self.cats = [cat for cat in all_cats if cat["id"] in self.class_ids]
-            self._classes = tuple(selected_cat_names)
+            id_to_name = {name_to_id[name]: name for name in matched_cat_names}
+            self._classes = tuple([id_to_name[cat_id] for cat_id in self.class_ids])
             # 获取包含选定类别的图像id
             img_ids_with_selected_cats = []
             for cat_id in self.class_ids:

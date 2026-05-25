@@ -17,4 +17,4 @@ tensorboard
 pycocotools
 onnx==1.18
 onnxruntime==1.18
-onnx-simplifier
+onnxsim

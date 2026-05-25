@@ -38,68 +38,86 @@ class MappedCOCODataset(COCODataset):
         self._build_custom_cat_id_mapping()
     
     def _build_custom_cat_id_mapping(self):
-        """
-        构建从原始数据集类别ID到目标统一ID的映射表
-        修复：处理同名不同ID的类别情况，确保所有同名类别都能正确映射
-        """
         self.cat_id_to_custom_id = {}
         
-        # 如果使用了selected_cat_names，只映射选定的类别
         if hasattr(self, 'selected_cat_names') and self.selected_cat_names:
-            # 遍历选定的类别
             for cat_name in self.selected_cat_names:
-                # 查找原始COCO数据集中所有同名的类别ID
-                # 注意：这里移除了break，以处理同名不同ID的类别
                 for cat_info in self.coco.cats.values():
-                    if cat_info['name'] == cat_name:
-                        # 映射到目标ID
+                    if cat_info['name'] == cat_name or cat_info['name'].lower() == cat_name.lower():
                         if cat_name in self.class_mapping:
                             self.cat_id_to_custom_id[cat_info['id']] = self.class_mapping[cat_name]
+                        elif cat_info['name'].lower() in [k.lower() for k in self.class_mapping.keys()]:
+                            for key in self.class_mapping:
+                                if key.lower() == cat_info['name'].lower():
+                                    self.cat_id_to_custom_id[cat_info['id']] = self.class_mapping[key]
+                                    break
         else:
-            # 映射所有可用类别
             for cat_info in self.coco.cats.values():
                 cat_name = cat_info['name']
                 if cat_name in self.class_mapping:
                     self.cat_id_to_custom_id[cat_info['id']] = self.class_mapping[cat_name]
+                elif cat_name.lower() in [k.lower() for k in self.class_mapping.keys()]:
+                    for key in self.class_mapping:
+                        if key.lower() == cat_name.lower():
+                            self.cat_id_to_custom_id[cat_info['id']] = self.class_mapping[key]
+                            break
+    
+    def _load_coco_annotations(self):
+        annotations = [self.load_anno_from_ids(_ids) for _ids in self.ids]
+        
+        total_objects = 0
+        class_counts = {}
+        for anno in annotations:
+            objects = anno[0]
+            total_objects += len(objects)
+            for obj in objects:
+                class_idx = int(obj[4])
+                class_counts[class_idx] = class_counts.get(class_idx, 0) + 1
+        
+        print(f"===== Annotations Statistics =====")
+        print(f"Total objects annotated: {total_objects}")
+        print(f"Objects per class:")
+        for class_idx, count in sorted(class_counts.items()):
+            class_name = None
+            for name, idx in self.class_mapping.items():
+                if idx == class_idx:
+                    class_name = name
+                    break
+            if class_name:
+                print(f"  - {class_name}: {count}")
+        print(f"===== Annotations Statistics =====")
+        
+        return annotations
     
     def load_anno_from_ids(self, id_):
-        """
-        重写加载标注的方法，将原始类别ID映射到自定义ID
-        注意：当selected_cat_names不为None时，父类返回的res[i][4]已经是相对于selected_cat_names的索引
-        """
-        # 调用父类方法加载原始标注
         res, img_info, resized_info, file_name = super().load_anno_from_ids(id_)
         
-        # 如果有标注，转换类别ID
-        if len(res) > 0 and len(res[0]) > 4:  # res格式: [x1, y1, x2, y2, category_id, ...]
-            # 遍历所有标注
+        if len(res) > 0 and len(res[0]) > 4:
             for i in range(len(res)):
-                # 获取相对于selected_cat_names的索引
                 cls_idx = int(res[i][4])
                 
-                # 如果有selected_cat_names，使用它来获取类别名称
-                if hasattr(self, 'selected_cat_names') and self.selected_cat_names and cls_idx < len(self.selected_cat_names):
-                    original_cat_name = self.selected_cat_names[cls_idx]
+                if hasattr(self, '_classes') and self._classes and cls_idx < len(self._classes):
+                    original_cat_name = self._classes[cls_idx]
                 else:
-                    # 否则尝试从原始类别映射中获取
                     original_cat_name = None
                     for cat_id, custom_id in self.cat_id_to_custom_id.items():
                         if custom_id == cls_idx:
-                            # 找到对应的原始cat_info
                             for cat_info in self.coco.cats.values():
                                 if cat_info['id'] == cat_id:
                                     original_cat_name = cat_info['name']
                                     break
                             break
                 
-                # 根据类别名称映射到统一的ID
                 if original_cat_name in self.class_mapping:
                     res[i][4] = self.class_mapping[original_cat_name]
                 else:
-                    # 如果没有映射，将其过滤掉
-                    res[i] = None
+                    for key in self.class_mapping:
+                        if key.lower() == original_cat_name.lower():
+                            res[i][4] = self.class_mapping[key]
+                            break
+                    else:
+                        res[i] = None
             
-            # 过滤掉None值
             res = [r for r in res if r is not None]
         
         return res, img_info, resized_info, file_name
