@@ -21,7 +21,7 @@ from yolox.utils import replace_module
 def make_parser():
     parser = argparse.ArgumentParser("YOLOX 充电器数据集 ONNX 导出工具")
     parser.add_argument(
-        "--output-name", type=str, default="charger_yolox_s.onnx", help="输出模型名称"
+        "--output-name", type=str, required=True, help="输出模型名称"
     )
     parser.add_argument(
         "--input", default="images", type=str, help="ONNX模型的输入节点名称"
@@ -40,9 +40,9 @@ def make_parser():
     parser.add_argument(
         "-f",
         "--exp_file",
-        default="exps/example/custom/charger_yolox_s.py",
+        required=True,
         type=str,
-        help="实验配置文件路径，默认为充电器数据集配置",
+        help="实验配置文件路径",
     )
     parser.add_argument("-expn", "--experiment-name", type=str, default=None)
     parser.add_argument("-n", "--name", type=str, default=None, help="模型名称（保持兼容性）")
@@ -57,7 +57,8 @@ def make_parser():
     parser.add_argument(
         "--decode_in_inference",
         action="store_true",
-        help="是否在推理时进行解码（推荐启用）"
+        default=True,
+        help="是否在推理时进行解码（默认启用）"
     )
 
     return parser
